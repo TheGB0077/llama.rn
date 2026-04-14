@@ -2,13 +2,19 @@
 
 #include "batch/batch.h"
 #include "models/dac.h"
-#include "models/mimi.h"
-#include "models/qwen3_tts_tokenizer.h"
-#include "models/wavtokenizer.h"
+
 #include "ops/safe_math.h"
 #include "runtime/graph.h"
 #include "runtime/lm_gguf_kv.h"
 #include "runtime/tensor_utils.h"
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define CODEC_LOG(...) __android_log_print(ANDROID_LOG_INFO, "RNLlama", __VA_ARGS__)
+#else
+#include <cstdio>
+#define CODEC_LOG(...) do { fprintf(stderr, "[CODEC] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
 
 #include <ggml-backend.h>
 
@@ -81,20 +87,8 @@ void codec_metadata_free(struct codec_lm_gguf_metadata * meta) {
 }
 
 enum codec_arch codec_arch_from_string(const std::string & arch) {
-    if (arch == "wavtokenizer_large" || arch == "wavtokenizer-large") {
-        return CODEC_ARCH_WAVTOKENIZER_LARGE;
-    }
-
     if (arch == "dac") {
         return CODEC_ARCH_DAC;
-    }
-
-    if (arch == "mimi") {
-        return CODEC_ARCH_MIMI;
-    }
-
-    if (arch == "qwen3_tts_tokenizer" || arch == "qwen3-tts-tokenizer" || arch == "qwen3") {
-        return CODEC_ARCH_QWEN3_TTS_TOKENIZER;
     }
 
     return CODEC_ARCH_UNKNOWN;
@@ -102,14 +96,11 @@ enum codec_arch codec_arch_from_string(const std::string & arch) {
 
 static const codec_model_vtable * codec_model_vtable_for_arch(enum codec_arch arch) {
     switch (arch) {
-        case CODEC_ARCH_WAVTOKENIZER_LARGE:
-            return codec_wavtokenizer_vtable();
         case CODEC_ARCH_DAC:
             return codec_dac_vtable();
+        case CODEC_ARCH_WAVTOKENIZER_LARGE:
         case CODEC_ARCH_MIMI:
-            return codec_mimi_vtable();
         case CODEC_ARCH_QWEN3_TTS_TOKENIZER:
-            return codec_qwen3_tts_tokenizer_vtable();
         case CODEC_ARCH_UNKNOWN:
         default:
             return nullptr;
@@ -118,8 +109,8 @@ static const codec_model_vtable * codec_model_vtable_for_arch(enum codec_arch ar
 
 const char * codec_arch_name(enum codec_arch arch) {
     switch (arch) {
-        case CODEC_ARCH_WAVTOKENIZER_LARGE: return "WavTokenizer-Large";
         case CODEC_ARCH_DAC:                return "DAC";
+        case CODEC_ARCH_WAVTOKENIZER_LARGE: return "WavTokenizer-Large";
         case CODEC_ARCH_MIMI:               return "Mimi";
         case CODEC_ARCH_QWEN3_TTS_TOKENIZER:return "Qwen3-TTS-Tokenizer";
         case CODEC_ARCH_UNKNOWN:
@@ -178,7 +169,7 @@ static enum codec_status codec_dispatch_decode(
 
 struct codec_model_params codec_model_default_params(void) {
     struct codec_model_params result = {
-        /*.use_gpu   =*/ false,
+        /*.use_gpu   =*/ true,
         /*.n_threads =*/ 0,
     };
 
@@ -351,6 +342,22 @@ struct codec_model * codec_model_load_from_file(const char * path_model, struct 
     }
 
     codec_collect_lm_gguf_metadata(model);
+
+    {
+        const int64_t dump_count = n_tensors > 30 ? 30 : n_tensors;
+        for (int64_t di = 0; di < dump_count; di++) {
+            const char * tname = lm_gguf_get_tensor_name(gf, di);
+            CODEC_LOG("  tensor[%lld] = %s", (long long)di, tname ? tname : "(null)");
+        }
+        for (int64_t di = 0; di < n_tensors; di++) {
+            const char * tname = lm_gguf_get_tensor_name(gf, di);
+            if (tname && (strncmp(tname, "dec.", 4) == 0 || strncmp(tname, "vq.", 3) == 0 || strstr(tname, "decoder") != nullptr)) {
+                CODEC_LOG("  DECODER tensor[%lld] = %s", (long long)di, tname);
+            }
+        }
+        CODEC_LOG("  Total tensors: %lld (showing first %lld + all dec.*)", (long long)n_tensors, (long long)dump_count);
+    }
+
     const enum codec_status init_st = codec_model_init_arch(model);
     if (init_st != CODEC_STATUS_SUCCESS) {
         codec_model_free(model);

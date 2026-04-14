@@ -12,7 +12,7 @@ OPENCL_HEADERS_DIR="$ROOT_DIR/$OPENCL_HEADERS_SUBMODULE"
 git submodule update --init --recursive "$OPENCL_ICD_SUBMODULE"
 git submodule update --init --recursive "$OPENCL_HEADERS_SUBMODULE"
 
-NDK_VERSION=27.3.13750724
+NDK_VERSION=27.1.12297006
 CMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/$NDK_VERSION/build/cmake/android.toolchain.cmake
 ANDROID_PLATFORM=android-21
 CMAKE_BUILD_TYPE=Release
@@ -81,9 +81,7 @@ build_opencl() {
 
 # Build for arm64-v8a
 build_opencl arm64-v8a
-
-# Badd more builds here, eg
-# build_opencl x86_64
+build_opencl x86_64
 
 t1=$(date +%s)
 echo "Total time: $((t1 - t0)) seconds"

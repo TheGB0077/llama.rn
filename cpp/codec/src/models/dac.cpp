@@ -45,8 +45,9 @@ enum codec_status codec_dac_init(struct codec_model * model) {
 static constexpr int32_t CODEC_DAC_MAX_BLOCKS = 8;
 static constexpr int32_t CODEC_DAC_RES_UNITS = 3;
 static constexpr int32_t CODEC_DAC_RES_DILATIONS[CODEC_DAC_RES_UNITS] = { 1, 3, 9 };
-static constexpr int32_t CODEC_DAC_NAMING_MODEL = 1;
 static constexpr int32_t CODEC_DAC_NAMING_LEGACY = 0;
+static constexpr int32_t CODEC_DAC_NAMING_MODEL = 1;
+static constexpr int32_t CODEC_DAC_NAMING_NUMBERED = 2;
 
 struct dac_decode_build {
     int32_t t;
@@ -97,6 +98,52 @@ static lm_ggml_tensor * codec_dac_get_tensor(codec_model * model, const std::str
         return nullptr;
     }
     return lm_ggml_get_tensor(model->weights, name.c_str());
+}
+
+static lm_ggml_tensor * codec_dac_get_weight_tensor(codec_model * model, const std::string & base_name) {
+    lm_ggml_tensor * t = codec_dac_get_tensor(model, base_name);
+    if (t != nullptr) return t;
+    t = codec_dac_get_tensor(model, base_name + "_v");
+    return t;
+}
+
+static bool codec_dac_read_weight_f32(codec_model * model, const std::string & base_name, std::vector<float> & out, std::string * err) {
+    lm_ggml_tensor * t = codec_dac_get_tensor(model, base_name);
+    if (t != nullptr) {
+        return codec_tensor_as_vec_f32(t, &out);
+    }
+    lm_ggml_tensor * t_v = codec_dac_get_tensor(model, base_name + "_v");
+    lm_ggml_tensor * t_g = codec_dac_get_tensor(model, base_name + "_g");
+    if (t_v != nullptr && t_g != nullptr) {
+        std::vector<float> v_data, g_data;
+        if (!codec_tensor_as_vec_f32(t_v, &v_data) || !codec_tensor_as_vec_f32(t_g, &g_data)) {
+            if (err) *err = "failed reading weight_norm tensors: " + base_name;
+            return false;
+        }
+        const int64_t n = lm_ggml_nelements(t_v);
+        const int64_t n_groups = (int64_t)g_data.size();
+        if (n_groups <= 0 || n % n_groups != 0) {
+            if (err) *err = "weight_norm group mismatch: " + base_name;
+            return false;
+        }
+        const int64_t group_size = n / n_groups;
+        out.resize(n);
+        for (int64_t c = 0; c < n_groups; c++) {
+            float norm = 1e-8f;
+            for (int64_t i = 0; i < group_size; i++) {
+                float v = v_data[c * group_size + i];
+                norm += v * v;
+            }
+            norm = sqrtf(norm);
+            const float g = g_data[c];
+            for (int64_t i = 0; i < group_size; i++) {
+                out[c * group_size + i] = g * v_data[c * group_size + i] / norm;
+            }
+        }
+        return true;
+    }
+    if (err) *err = "missing weight tensor: " + base_name;
+    return false;
 }
 
 static std::string codec_dac_decode_codebook_tensor_name(int32_t qi) {
@@ -157,36 +204,35 @@ static std::string codec_dac_model_block_prefix(int32_t naming_mode, int32_t bi)
     if (naming_mode == CODEC_DAC_NAMING_MODEL) {
         return "dec.model." + std::to_string(bi + 1) + ".block.";
     }
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED) {
+        return "dec.model." + std::to_string(bi + 1) + ".block.";
+    }
     return "dec.block." + std::to_string(bi) + ".";
 }
 
 static std::string codec_dac_model_conv1_w_name(int32_t naming_mode) {
-    return naming_mode == CODEC_DAC_NAMING_MODEL ? "dec.model.0.weight" : "dec.conv1.weight";
+    if (naming_mode == CODEC_DAC_NAMING_LEGACY) return "dec.conv1.weight";
+    return "dec.model.0.weight";
 }
 
 static std::string codec_dac_model_conv1_b_name(int32_t naming_mode) {
-    return naming_mode == CODEC_DAC_NAMING_MODEL ? "dec.model.0.bias" : "dec.conv1.bias";
+    if (naming_mode == CODEC_DAC_NAMING_LEGACY) return "dec.conv1.bias";
+    return "dec.model.0.bias";
 }
 
 static std::string codec_dac_model_conv2_w_name(int32_t naming_mode, int32_t n_blocks) {
-    if (naming_mode == CODEC_DAC_NAMING_MODEL) {
-        return "dec.model." + std::to_string(n_blocks + 2) + ".weight";
-    }
-    return "dec.conv2.weight";
+    if (naming_mode == CODEC_DAC_NAMING_LEGACY) return "dec.conv2.weight";
+    return "dec.model." + std::to_string(n_blocks + 2) + ".weight";
 }
 
 static std::string codec_dac_model_conv2_b_name(int32_t naming_mode, int32_t n_blocks) {
-    if (naming_mode == CODEC_DAC_NAMING_MODEL) {
-        return "dec.model." + std::to_string(n_blocks + 2) + ".bias";
-    }
-    return "dec.conv2.bias";
+    if (naming_mode == CODEC_DAC_NAMING_LEGACY) return "dec.conv2.bias";
+    return "dec.model." + std::to_string(n_blocks + 2) + ".bias";
 }
 
 static std::string codec_dac_model_final_snake_name(int32_t naming_mode, int32_t n_blocks) {
-    if (naming_mode == CODEC_DAC_NAMING_MODEL) {
-        return "dec.model." + std::to_string(n_blocks + 1) + ".alpha";
-    }
-    return "dec.snake1.alpha";
+    if (naming_mode == CODEC_DAC_NAMING_LEGACY) return "dec.snake1.alpha";
+    return "dec.model." + std::to_string(n_blocks + 1) + ".alpha";
 }
 
 static std::string codec_dac_model_enc_conv1_w_name() { return "enc.block.0.weight"; }
@@ -274,38 +320,56 @@ static std::string codec_dac_encode_out_proj_b_tensor_name(int32_t qi) {
 }
 
 static std::string codec_dac_model_block_snake_name(int32_t naming_mode, int32_t bi) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + "0.alpha";
     return codec_dac_model_block_prefix(naming_mode, bi) + "snake1.alpha";
 }
 
 static std::string codec_dac_model_block_convtr_w_name(int32_t naming_mode, int32_t bi) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + "1.weight";
     return codec_dac_model_block_prefix(naming_mode, bi) + "conv_t1.weight";
 }
 
 static std::string codec_dac_model_block_convtr_b_name(int32_t naming_mode, int32_t bi) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + "1.bias";
     return codec_dac_model_block_prefix(naming_mode, bi) + "conv_t1.bias";
 }
 
 static std::string codec_dac_model_resunit_snake1_name(int32_t naming_mode, int32_t bi, int32_t ri) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + std::to_string(ri + 2) + ".block.0.alpha";
     return codec_dac_model_block_prefix(naming_mode, bi) + "res_unit" + std::to_string(ri + 1) + ".snake1.alpha";
 }
 
 static std::string codec_dac_model_resunit_snake2_name(int32_t naming_mode, int32_t bi, int32_t ri) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + std::to_string(ri + 2) + ".block.2.alpha";
     return codec_dac_model_block_prefix(naming_mode, bi) + "res_unit" + std::to_string(ri + 1) + ".snake2.alpha";
 }
 
 static std::string codec_dac_model_resunit_conv1_w_name(int32_t naming_mode, int32_t bi, int32_t ri) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + std::to_string(ri + 2) + ".block.1.weight";
     return codec_dac_model_block_prefix(naming_mode, bi) + "res_unit" + std::to_string(ri + 1) + ".conv1.weight";
 }
 
 static std::string codec_dac_model_resunit_conv1_b_name(int32_t naming_mode, int32_t bi, int32_t ri) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + std::to_string(ri + 2) + ".block.1.bias";
     return codec_dac_model_block_prefix(naming_mode, bi) + "res_unit" + std::to_string(ri + 1) + ".conv1.bias";
 }
 
 static std::string codec_dac_model_resunit_conv2_w_name(int32_t naming_mode, int32_t bi, int32_t ri) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + std::to_string(ri + 2) + ".block.3.weight";
     return codec_dac_model_block_prefix(naming_mode, bi) + "res_unit" + std::to_string(ri + 1) + ".conv2.weight";
 }
 
 static std::string codec_dac_model_resunit_conv2_b_name(int32_t naming_mode, int32_t bi, int32_t ri) {
+    if (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        return codec_dac_model_block_prefix(naming_mode, bi) + std::to_string(ri + 2) + ".block.3.bias";
     return codec_dac_model_block_prefix(naming_mode, bi) + "res_unit" + std::to_string(ri + 1) + ".conv2.bias";
 }
 
@@ -373,26 +437,22 @@ static bool codec_dac_copy_conv1d_weight_to_3d(
     std::string * err) {
 
     lm_ggml_tensor * src = codec_dac_get_tensor(ctx->model, src_name);
-    if (src == nullptr) {
-        if (err != nullptr) {
-            *err = "missing DAC tensor: " + src_name;
-        }
-        return false;
-    }
     std::vector<float> src_v;
-    if (!codec_tensor_as_vec_f32(src, &src_v)) {
-        if (err != nullptr) {
-            *err = "failed reading DAC tensor: " + src_name;
+    if (src != nullptr) {
+        if (!codec_tensor_as_vec_f32(src, &src_v)) {
+            if (err != nullptr) *err = "failed reading DAC tensor: " + src_name;
+            return false;
         }
+    } else if (!codec_dac_read_weight_f32(ctx->model, src_name, src_v, err)) {
         return false;
     }
-
+    lm_ggml_tensor * shape_ref = src ? src : codec_dac_get_tensor(ctx->model, src_name + "_v");
     const int32_t dk = (int32_t) codec_ne(dst, 0);
     const int32_t din = (int32_t) codec_ne(dst, 1);
     const int32_t dout = (int32_t) codec_ne(dst, 2);
-    const int32_t n0 = (int32_t) codec_ne(src, 0);
-    const int32_t n1 = (int32_t) codec_ne(src, 1);
-    const int32_t n2 = (int32_t) codec_ne(src, 2);
+    const int32_t n0 = shape_ref ? (int32_t) codec_ne(shape_ref, 0) : (int32_t) src_v.size();
+    const int32_t n1 = shape_ref ? (int32_t) codec_ne(shape_ref, 1) : 1;
+    const int32_t n2 = shape_ref ? (int32_t) codec_ne(shape_ref, 2) : 1;
     std::vector<float> dst_v((size_t) dk * (size_t) din * (size_t) dout, 0.0f);
 
     if (n0 == dk && n1 == din && n2 == dout) {
@@ -424,26 +484,23 @@ static bool codec_dac_copy_convtr_weight_to_3d(
     std::string * err) {
 
     lm_ggml_tensor * src = codec_dac_get_tensor(ctx->model, src_name);
-    if (src == nullptr) {
-        if (err != nullptr) {
-            *err = "missing DAC tensor: " + src_name;
-        }
-        return false;
-    }
     std::vector<float> src_v;
-    if (!codec_tensor_as_vec_f32(src, &src_v)) {
-        if (err != nullptr) {
-            *err = "failed reading DAC tensor: " + src_name;
+    if (src != nullptr) {
+        if (!codec_tensor_as_vec_f32(src, &src_v)) {
+            if (err != nullptr) *err = "failed reading DAC tensor: " + src_name;
+            return false;
         }
+    } else if (!codec_dac_read_weight_f32(ctx->model, src_name, src_v, err)) {
         return false;
     }
+    lm_ggml_tensor * shape_ref = src ? src : codec_dac_get_tensor(ctx->model, src_name + "_v");
 
     const int32_t dk = (int32_t) codec_ne(dst, 0);
     const int32_t dout = (int32_t) codec_ne(dst, 1);
     const int32_t din = (int32_t) codec_ne(dst, 2);
-    const int32_t n0 = (int32_t) codec_ne(src, 0);
-    const int32_t n1 = (int32_t) codec_ne(src, 1);
-    const int32_t n2 = (int32_t) codec_ne(src, 2);
+    const int32_t n0 = shape_ref ? (int32_t) codec_ne(shape_ref, 0) : (int32_t) src_v.size();
+    const int32_t n1 = shape_ref ? (int32_t) codec_ne(shape_ref, 1) : 1;
+    const int32_t n2 = shape_ref ? (int32_t) codec_ne(shape_ref, 2) : 1;
     std::vector<float> dst_v((size_t) dk * (size_t) dout * (size_t) din, 0.0f);
 
     if (n0 == dk && n1 == dout && n2 == din) {
@@ -670,23 +727,20 @@ static bool codec_dac_copy_out_proj_to_2d(
     std::string * err) {
 
     lm_ggml_tensor * src = lm_ggml_get_tensor(ctx->model->weights, model_name.c_str());
-    if (src == nullptr) {
-        if (err != nullptr) {
-            *err = "missing DAC tensor: " + model_name;
-        }
-        return false;
-    }
     std::vector<float> src_v;
-    if (!codec_tensor_as_vec_f32(src, &src_v)) {
-        if (err != nullptr) {
-            *err = "failed reading DAC tensor: " + model_name;
+    if (src != nullptr) {
+        if (!codec_tensor_as_vec_f32(src, &src_v)) {
+            if (err != nullptr) *err = "failed reading DAC tensor: " + model_name;
+            return false;
         }
+    } else if (!codec_dac_read_weight_f32(ctx->model, model_name, src_v, err)) {
         return false;
     }
+    lm_ggml_tensor * shape_ref = src ? src : lm_ggml_get_tensor(ctx->model->weights, (model_name + "_v").c_str());
 
-    const int32_t n0 = (int32_t) codec_ne(src, 0);
-    const int32_t n1 = (int32_t) codec_ne(src, 1);
-    const int32_t n2 = (int32_t) std::max<int64_t>(1, codec_ne(src, 2));
+    const int32_t n0 = shape_ref ? (int32_t) codec_ne(shape_ref, 0) : (int32_t) src_v.size();
+    const int32_t n1 = shape_ref ? (int32_t) codec_ne(shape_ref, 1) : 1;
+    const int32_t n2 = shape_ref ? (int32_t) std::max<int64_t>(1, codec_ne(shape_ref, 2)) : 1;
     std::vector<float> dst_v((size_t) codebook_dim * (size_t) hidden_dim, 0.0f);
 
     if (n0 == codebook_dim && n1 == hidden_dim && n2 == 1) {
@@ -705,7 +759,7 @@ static bool codec_dac_copy_out_proj_to_2d(
                 dst_v[(size_t) i + (size_t) codebook_dim * (size_t) o] = src_v[src_idx];
             }
         }
-    } else if (n0 == codebook_dim && n1 == hidden_dim && codec_ne(src, 2) == 0) {
+    } else if (n0 == codebook_dim && n1 == hidden_dim && (!shape_ref || codec_ne(shape_ref, 2) == 0)) {
         dst_v = src_v;
     } else {
         if (err != nullptr) {
@@ -744,11 +798,17 @@ static bool codec_dac_init_decode_build(
     std::fill_n(build->block_convtr_in, CODEC_DAC_MAX_BLOCKS, 0);
     std::fill_n(build->block_convtr_out, CODEC_DAC_MAX_BLOCKS, 0);
 
-    const int32_t naming_mode = codec_dac_get_tensor(ctx->model, codec_dac_model_conv1_w_name(CODEC_DAC_NAMING_MODEL)) != nullptr ?
-        CODEC_DAC_NAMING_MODEL : CODEC_DAC_NAMING_LEGACY;
+    int32_t naming_mode = CODEC_DAC_NAMING_LEGACY;
+    if (codec_dac_get_tensor(ctx->model, codec_dac_model_conv1_w_name(CODEC_DAC_NAMING_MODEL)) != nullptr) {
+        naming_mode = CODEC_DAC_NAMING_MODEL;
+    } else if (codec_dac_get_weight_tensor(ctx->model, codec_dac_model_conv1_w_name(CODEC_DAC_NAMING_NUMBERED)) != nullptr) {
+        naming_mode = CODEC_DAC_NAMING_NUMBERED;
+    }
     build->naming_mode = naming_mode;
 
-    lm_ggml_tensor * conv1_w = codec_dac_get_tensor(ctx->model, codec_dac_model_conv1_w_name(naming_mode));
+    lm_ggml_tensor * conv1_w = (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        ? codec_dac_get_weight_tensor(ctx->model, codec_dac_model_conv1_w_name(naming_mode))
+        : codec_dac_get_tensor(ctx->model, codec_dac_model_conv1_w_name(naming_mode));
     lm_ggml_tensor * conv1_b = codec_dac_get_tensor(ctx->model, codec_dac_model_conv1_b_name(naming_mode));
     if (conv1_w == nullptr || conv1_b == nullptr ||
         !codec_dac_infer_conv1d_shape(conv1_w, conv1_b, &build->conv1_kernel, &build->hidden_dim, &build->conv1_out)) {
@@ -762,7 +822,9 @@ static bool codec_dac_init_decode_build(
     for (int32_t bi = 0; bi < CODEC_DAC_MAX_BLOCKS; ++bi) {
         const std::string ctr_w_name = codec_dac_model_block_convtr_w_name(naming_mode, bi);
         const std::string ctr_b_name = codec_dac_model_block_convtr_b_name(naming_mode, bi);
-        lm_ggml_tensor * ctr_w = codec_dac_get_tensor(ctx->model, ctr_w_name);
+        lm_ggml_tensor * ctr_w = (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+            ? codec_dac_get_weight_tensor(ctx->model, ctr_w_name)
+            : codec_dac_get_tensor(ctx->model, ctr_w_name);
         lm_ggml_tensor * ctr_b = codec_dac_get_tensor(ctx->model, ctr_b_name);
         if (ctr_w == nullptr || ctr_b == nullptr) {
             break;
@@ -789,7 +851,9 @@ static bool codec_dac_init_decode_build(
         return false;
     }
 
-    lm_ggml_tensor * conv2_w = codec_dac_get_tensor(ctx->model, codec_dac_model_conv2_w_name(naming_mode, build->n_blocks));
+    lm_ggml_tensor * conv2_w = (naming_mode == CODEC_DAC_NAMING_NUMBERED)
+        ? codec_dac_get_weight_tensor(ctx->model, codec_dac_model_conv2_w_name(naming_mode, build->n_blocks))
+        : codec_dac_get_tensor(ctx->model, codec_dac_model_conv2_w_name(naming_mode, build->n_blocks));
     lm_ggml_tensor * conv2_b = codec_dac_get_tensor(ctx->model, codec_dac_model_conv2_b_name(naming_mode, build->n_blocks));
     int32_t conv2_out = 0;
     if (conv2_w == nullptr || conv2_b == nullptr ||

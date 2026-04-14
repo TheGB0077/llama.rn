@@ -13,7 +13,6 @@ namespace rnllama_jsi {
     struct JSIRequestCallbacks {
         std::shared_ptr<jsi::Function> onToken;
         std::shared_ptr<jsi::Function> onComplete;
-        std::shared_ptr<jsi::Function> onResult; // For embedding/rerank
     };
 
     class RequestManager {
@@ -59,7 +58,7 @@ namespace rnllama_jsi {
             if (it != requests.end()) {
                 return it->second;
             }
-            return {nullptr, nullptr, nullptr};
+            return {nullptr, nullptr};
         }
         
         static RequestManager& getInstance() {

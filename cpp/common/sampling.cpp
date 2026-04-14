@@ -3,7 +3,6 @@
 #include "common.h"
 #include "ggml.h"
 #include "log.h"
-#include "reasoning-budget.h"
 
 #include <algorithm>
 #include <cctype>
@@ -110,7 +109,6 @@ struct common_sampler {
     common_params_sampling params;
 
     struct llama_sampler * grmr;
-    struct llama_sampler * rbudget;
     struct llama_sampler * chain;
 
     ring_buffer<llama_token> prev;
@@ -287,27 +285,6 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         }
     }
 
-    // reasoning budget sampler
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty()) {
-        if (params.reasoning_budget_activate_immediately) {
-            rbudget = common_reasoning_budget_init(
-                vocab,
-                params.reasoning_budget_start,
-                params.reasoning_budget_end,
-                params.reasoning_budget_forced,
-                params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens,
-                REASONING_BUDGET_COUNTING);
-        } else {
-            rbudget = common_reasoning_budget_init(
-                vocab,
-                params.reasoning_budget_start,
-                params.reasoning_budget_end,
-                params.reasoning_budget_forced,
-                params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens,
-                prefill_tokens);
-        }
-    }
-
     if (params.has_logit_bias()) {
         samplers.push_back(llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), params.logit_bias.size(), params.logit_bias.data()));
     }
@@ -393,16 +370,9 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         params.backend_sampling = false;
     }
 
-    if (rbudget && params.backend_sampling) {
-        LOG_WRN("%s: backend sampling is not compatible with reasoning budget, disabling\n", __func__);
-
-        params.backend_sampling = false;
-    }
-
     auto * result = new common_sampler {
         /* .params  = */ params,
         /* .grmr    = */ grmr,
-        /* .rbudget = */ rbudget,
         /* .chain   = */ chain,
         /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
         /* .cur     = */ {},
@@ -418,7 +388,6 @@ void common_sampler_free(struct common_sampler * gsmpl) {
     }
 
     llama_sampler_free(gsmpl->grmr);
-    llama_sampler_free(gsmpl->rbudget);
     llama_sampler_free(gsmpl->chain);
 
     delete gsmpl;
@@ -427,14 +396,6 @@ void common_sampler_free(struct common_sampler * gsmpl) {
 static bool grammar_should_apply(struct common_sampler * gsmpl) {
     if (!gsmpl->grmr) {
         return false;
-    }
-    if (!gsmpl->rbudget) {
-        return true;
-    }
-    if (gsmpl->params.grammar_lazy) {
-        // if grammar is lazy, only apply when reasoning budget is not active
-        const auto state = common_reasoning_budget_get_state(gsmpl->rbudget);
-        return state == REASONING_BUDGET_IDLE || state == REASONING_BUDGET_DONE;
     }
     return true;
 }
@@ -446,10 +407,8 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
 
     const auto tm = gsmpl->tm();
 
-    // grammar_should_apply() checks the reasoning budget state, so calculate this before we accept
+    // grammar_should_apply() checks the grammar state, so calculate this before we accept
     accept_grammar = accept_grammar && grammar_should_apply(gsmpl);
-
-    llama_sampler_accept(gsmpl->rbudget, token);
 
     if (gsmpl->grmr && accept_grammar) {
         llama_sampler_accept(gsmpl->grmr, token);
@@ -472,7 +431,6 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
     return new common_sampler {
         /* .params  = */ gsmpl->params,
         /* .grmr    = */ llama_sampler_clone(gsmpl->grmr),
-        /* .rbudget = */ llama_sampler_clone(gsmpl->rbudget),
         /* .chain   = */ llama_sampler_clone(gsmpl->chain),
         /* .prev    = */ gsmpl->prev,
         /* .cur     = */ gsmpl->cur,
@@ -542,7 +500,6 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     llama_token id = LLAMA_TOKEN_NULL;
 
     auto & grmr  = gsmpl->grmr;
-    auto & rbudget = gsmpl->rbudget;
     auto & chain = gsmpl->chain;
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
@@ -555,7 +512,6 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
             LOG_DBG("%s: Backend sampler selected token: '%d'. Will not run any CPU samplers\n", __func__, id);
 
             LM_GGML_ASSERT(!gsmpl->grmr    && "using grammar in combination with backend sampling is not supported");
-            LM_GGML_ASSERT(!gsmpl->rbudget && "using reasoning budget in combination with backend sampling is not supported");
 
             // TODO: simplify
             gsmpl->cur.resize(1);
@@ -567,9 +523,6 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     }
 
     gsmpl->set_logits(ctx, idx);
-
-    // apply reasoning budget first
-    llama_sampler_apply(rbudget, &cur_p);
 
     if (grammar_first && grammar_should_apply(gsmpl)) {
         llama_sampler_apply(grmr, &cur_p);
@@ -599,8 +552,6 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     // resampling:
     // if the token is not valid, sample again, but first apply the grammar sampler and then the sampling chain
     gsmpl->set_logits(ctx, idx);
-
-    llama_sampler_apply(rbudget,  &cur_p);
 
     if (grammar_should_apply(gsmpl)) {
         llama_sampler_apply(grmr,  &cur_p);

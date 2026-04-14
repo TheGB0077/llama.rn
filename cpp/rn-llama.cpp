@@ -1,37 +1,11 @@
 #include "rn-llama.h"
 #include "ggml-cpu.h"
 #include "rn-tts.h"
-#include "rn-mtmd.hpp"
-#include "rn-completion.h"
-#include "rn-slot-manager.h"
 #include "rn-common.hpp"
-
-// Include multimodal support
-#include "tools/mtmd/mtmd.h"
-#include "tools/mtmd/mtmd-helper.h"
-#include "tools/mtmd/clip.h"
 
 #include <cstdarg>
 
 namespace rnllama {
-
-namespace {
-
-void populate_lora_metadata(common_adapter_lora_info &la) {
-    if (la.ptr == nullptr) {
-        la.task_name.clear();
-        la.prompt_prefix.clear();
-        return;
-    }
-
-    char buf[1024];
-    llama_adapter_meta_val_str(la.ptr, "adapter.lora.task_name", buf, sizeof(buf));
-    la.task_name = buf;
-    llama_adapter_meta_val_str(la.ptr, "adapter.lora.prompt_prefix", buf, sizeof(buf));
-    la.prompt_prefix = buf;
-}
-
-} // namespace
 
 std::string get_backend_devices_info() {
     return backend_devices_info();
@@ -51,7 +25,7 @@ static const std::vector<lm_ggml_type> kv_cache_types = {
 
 lm_ggml_type kv_cache_type_from_str(const std::string & s) {
     if (s.empty()) {
-        return LM_GGML_TYPE_F16; // Default to F16 if empty string
+        return LM_GGML_TYPE_F16;
     }
 
     for (const auto & type : kv_cache_types) {
@@ -60,20 +34,14 @@ lm_ggml_type kv_cache_type_from_str(const std::string & s) {
         }
     }
 
-    // Return default type instead of throwing to avoid crashes
     return LM_GGML_TYPE_F16;
 }
 
 enum llama_flash_attn_type flash_attn_type_from_str(const std::string & s) {
-    if (s == "on") {
-        return LLAMA_FLASH_ATTN_TYPE_ENABLED;
-    }
-    if (s == "off") {
-        return LLAMA_FLASH_ATTN_TYPE_DISABLED;
-    }
+    if (s == "on" || s == "true" || s == "1") return LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    if (s == "off" || s == "false" || s == "0") return LLAMA_FLASH_ATTN_TYPE_DISABLED;
     return LLAMA_FLASH_ATTN_TYPE_AUTO;
 }
-
 
 void log(const char *level, const char *function, int line,
                        const char *format, ...)
@@ -105,12 +73,9 @@ void log(const char *level, const char *function, int line,
     #endif
 }
 
-// format incomplete utf-8 multibyte character for output
 std::string tokens_to_output_formatted_string(const llama_context *ctx, const llama_token token)
 {
     std::string out = token == -1 ? "" : common_token_to_piece(ctx, token);
-    // if the size is 1 and first bit is 1, meaning it's a partial character
-    //   (size > 1 meaning it's already a known token)
     if (out.size() == 1 && (out[0] & 0x80) == 0x80)
     {
         std::stringstream ss;
@@ -130,7 +95,6 @@ std::string tokens_to_str(llama_context *ctx, const std::vector<llama_token>::co
     }
     return ret;
 }
-
 
 void llama_rn_context::cleanupThreadpools() {
     if (ctx != nullptr && (threadpool != nullptr || threadpool_batch != nullptr)) {
@@ -203,33 +167,17 @@ bool llama_rn_context::attachThreadpoolsIfAvailable() {
 }
 
 llama_rn_context::~llama_rn_context() {
-    // Disable parallel mode first (cleans up slot_manager)
-    disableParallelMode();
-
-    removeLoraAdapters();
     cleanupThreadpools();
-
-    if (completion != nullptr) {
-        delete completion;
-        completion = nullptr;
-    }
-
-    releaseMultimodal();
     releaseVocoder();
+    delete completion;
 }
 
 bool llama_rn_context::loadModel(common_params &params_)
 {
-    removeLoraAdapters();
     params = params_;
 
-    // Ensure n_parallel is set to a reasonable default for parallel decoding support
-    // This sets n_seq_max in the context, which cannot be changed later
     if (params.n_parallel < 1) {
-        params.n_parallel = 8; // Default to support up to 8 parallel slots
-        LOG_INFO("Setting n_parallel to default: %d (enables up to %d parallel slots)", params.n_parallel, params.n_parallel);
-    } else {
-        LOG_INFO("Using n_parallel: %d (enables up to %d parallel slots)", params.n_parallel, params.n_parallel);
+        params.n_parallel = 1;
     }
 
     llama_init = common_init_from_params(params);
@@ -240,214 +188,18 @@ bool llama_rn_context::loadModel(common_params &params_)
         LOG_ERROR("unable to load model: %s", params_.model.path.c_str());
         return false;
     }
-    templates = common_chat_templates_init(model, params.chat_template);
     n_ctx = llama_n_ctx(ctx);
-
-    // Init-time adapters are already loaded and applied by common_init_from_params().
-    // Mirror the resulting adapter metadata so getLoadedLoraAdapters() reflects reality
-    // without forcing a second load/apply pass in the JSI layer.
-    lora = params.lora_adapters;
-    owned_lora.clear();
-    for (auto &la : lora) {
-        populate_lora_metadata(la);
-    }
-
-    // Log the actual n_seq_max that was set
-    uint32_t n_seq_max = llama_n_seq_max(ctx);
-    LOG_INFO("Context initialized with n_seq_max = %u", n_seq_max);
-
-    // Initialize completion context
-    if (completion != nullptr) {
-        delete completion;
-    }
     completion = new llama_rn_context_completion(this);
-
-    // Initialize context shift flag
-    LOG_INFO("ctx_shift: %s", params.ctx_shift ? "enabled" : "disabled");
-
-    // We can uncomment for debugging or after this fix: https://github.com/ggerganov/llama.cpp/pull/11101
-    // LOG_INFO("%s\n", common_params_get_system_info(params).c_str());
 
     return true;
 }
 
-
-bool llama_rn_context::validateModelChatTemplate(bool use_jinja, const char *name) const {
-    const char * tmpl = llama_model_chat_template(model, name);
-    if (tmpl == nullptr) {
-      return false;
-    }
-    return common_chat_verify_template(tmpl, use_jinja);
-}
-
-common_chat_params llama_rn_context::getFormattedChatWithJinja(
-        const std::string& messages,
-        const std::string& chat_template,
-        const std::string& json_schema,
-        const std::string& tools,
-        const bool& parallel_tool_calls,
-        const std::string& tool_choice,
-        const bool& enable_thinking,
-        const std::string& reasoning_format,
-        const bool& add_generation_prompt,
-        const std::string& now_str,
-        const std::map<std::string, std::string>& chat_template_kwargs,
-        const bool& force_pure_content
-) const {
-    common_chat_templates_inputs inputs;
-    inputs.use_jinja = true;
-    inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(messages));
-    auto useTools = !tools.empty();
-    if (useTools) {
-        inputs.tools = common_chat_tools_parse_oaicompat(json::parse(tools));
-    }
-    inputs.parallel_tool_calls = parallel_tool_calls;
-    if (!tool_choice.empty()) {
-        inputs.tool_choice = common_chat_tool_choice_parse_oaicompat(tool_choice);
-    }
-    if (!json_schema.empty()) {
-        inputs.json_schema = json_schema;
-    }
-    inputs.enable_thinking = enable_thinking;
-    inputs.reasoning_format = common_reasoning_format_from_name(reasoning_format);
-    inputs.add_generation_prompt = add_generation_prompt;
-
-    // Handle now parameter - parse timestamp or use current time
-    if (!now_str.empty()) {
-        try {
-            // Try to parse as timestamp (seconds since epoch)
-            auto timestamp = std::stoll(now_str);
-            inputs.now = std::chrono::system_clock::from_time_t(timestamp);
-        } catch (...) {
-            // If parsing fails, use current time
-            inputs.now = std::chrono::system_clock::now();
-        }
-    }
-
-    inputs.chat_template_kwargs = chat_template_kwargs;
-    inputs.force_pure_content = force_pure_content;
-
-    // If chat_template is provided, create new one and use it (probably slow)
-    if (!chat_template.empty()) {
-        auto tmps = common_chat_templates_init(model, chat_template);
-        return common_chat_templates_apply(tmps.get(), inputs);
-    } else {
-        return common_chat_templates_apply(templates.get(), inputs);
-    }
-}
-
-std::string llama_rn_context::getFormattedChat(
-  const std::string &messages,
-  const std::string &chat_template
-) const {
-    common_chat_templates_inputs inputs;
-    inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(messages));
-    inputs.use_jinja = false;
-
-    // If chat_template is provided, create new one and use it (probably slow)
-    if (!chat_template.empty()) {
-        auto tmps = common_chat_templates_init(model, chat_template);
-        return common_chat_templates_apply(tmps.get(), inputs).prompt;
-    } else {
-        return common_chat_templates_apply(templates.get(), inputs).prompt;
-    }
-}
-
-llama_rn_tokenize_result llama_rn_context::tokenize(const std::string &text, const std::vector<std::string> &media_paths) {
-  if (media_paths.size() > 0) {
-      if (!isMultimodalEnabled()) {
-          throw std::runtime_error("Multimodal is not enabled but media paths are provided");
-      }
-      auto result = tokenizeWithMedia(mtmd_wrapper, text, media_paths);
-      mtmd_input_chunks_free(result.chunks);
-      llama_rn_tokenize_result tokenize_result;
-      tokenize_result.tokens = result.tokens;
-      tokenize_result.has_media = true;
-      tokenize_result.bitmap_hashes = result.bitmap_hashes;
-      tokenize_result.chunk_pos = result.chunk_pos;
-      tokenize_result.chunk_pos_media = result.chunk_pos_media;
-      return tokenize_result;
-  }
-  std::vector<llama_token> text_tokens;
-  text_tokens = common_tokenize(ctx, text, /* add_special= */ false, /* parse_special= */ true);
-  llama_rn_tokenize_result tokenize_result;
-  tokenize_result.tokens = text_tokens;
-  tokenize_result.has_media = false;
-  tokenize_result.bitmap_hashes = {};
-  tokenize_result.chunk_pos = {};
-  tokenize_result.chunk_pos_media = {};
-  return tokenize_result;
-}
-
-void llama_rn_context::applyLoraAdapters(std::vector<common_adapter_lora_info> lora) {
-    if (model == nullptr || ctx == nullptr) {
-        throw std::runtime_error("Cannot apply LoRA adapters: context is not initialized");
-    }
-
-    std::vector<llama_adapter_lora_ptr> loaded_adapters;
-    loaded_adapters.reserve(lora.size());
-
-    for (auto &la : lora) {
-        llama_adapter_lora_ptr adapter(llama_adapter_lora_init(model, la.path.c_str()));
-        if (adapter == nullptr) {
-            throw std::runtime_error(
-                "Failed to apply LoRA adapter '" + la.path +
-                "'. Check native logs for the detailed loader error. The adapter may not match the loaded base model."
-            );
-        }
-
-        la.ptr = adapter.get();
-        populate_lora_metadata(la);
-        loaded_adapters.emplace_back(std::move(adapter));
-    }
-
-    common_set_adapter_lora(ctx, lora);
-    owned_lora = std::move(loaded_adapters);
-    this->lora = std::move(lora);
-}
-
-void llama_rn_context::removeLoraAdapters() {
-    if (ctx != nullptr) {
-        std::vector<common_adapter_lora_info> empty_lora;
-        common_set_adapter_lora(ctx, empty_lora); // apply empty list
-    }
-
-    this->lora.clear();
-    owned_lora.clear();
-}
-
-std::vector<common_adapter_lora_info> llama_rn_context::getLoadedLoraAdapters() {
-    return this->lora;
-}
-
-bool llama_rn_context::initMultimodal(const std::string &mmproj_path, bool use_gpu, int image_min_tokens, int image_max_tokens) {
-    try {
-        mtmd_wrapper = new llama_rn_context_mtmd(mmproj_path, use_gpu, model, ctx, params, has_multimodal, params, image_min_tokens, image_max_tokens);
-        return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR("[DEBUG] Failed to initialize multimodal: %s", e.what());
-        return false;
-    }
-}
-
-bool llama_rn_context::isMultimodalEnabled() const {
-    return mtmd_wrapper != nullptr && mtmd_wrapper->isEnabled(has_multimodal);
-}
-
-bool llama_rn_context::isMultimodalSupportVision() const {
-    return isMultimodalEnabled() && mtmd_wrapper->supportVision();
-}
-
-bool llama_rn_context::isMultimodalSupportAudio() const {
-    return isMultimodalEnabled() && mtmd_wrapper->supportAudio();
-}
-
-void llama_rn_context::releaseMultimodal() {
-    if (mtmd_wrapper != nullptr) {
-        delete mtmd_wrapper;
-        mtmd_wrapper = nullptr;
-        has_multimodal = false;
-    }
+llama_rn_tokenize_result llama_rn_context::tokenize(const std::string &text) {
+    std::vector<llama_token> text_tokens;
+    text_tokens = common_tokenize(ctx, text, false, true);
+    llama_rn_tokenize_result tokenize_result;
+    tokenize_result.tokens = text_tokens;
+    return tokenize_result;
 }
 
 bool llama_rn_context::initVocoder(const std::string &vocoder_model_path, int batch_size) {
@@ -473,77 +225,6 @@ void llama_rn_context::releaseVocoder() {
     has_vocoder = false;
 }
 
-// Enable parallel decoding mode
-void llama_rn_context::enableParallelMode(int32_t n_parallel, int32_t n_batch) {
-    if (ctx == nullptr) {
-        LOG_ERROR("Cannot enable parallel mode: context not initialized");
-        throw std::runtime_error("Cannot enable parallel mode: context not initialized");
-    }
-
-    // Verify n_seq_max is sufficient for requested parallel slots
-    uint32_t n_seq_max = llama_n_seq_max(ctx);
-    if (n_seq_max < (uint32_t)n_parallel) {
-        LOG_ERROR("Context n_seq_max (%u) is less than requested parallel slots (%d). Context was initialized with n_parallel=%d",
-                  n_seq_max, n_parallel, params.n_parallel);
-        LOG_ERROR("To use %d parallel slots, reinitialize the context with n_parallel >= %d", n_parallel, n_parallel);
-
-        char error_msg[512];
-        snprintf(error_msg, sizeof(error_msg),
-                "Failed to enable parallel mode with %d slots. Context n_seq_max (%u) is less than requested. "
-                "Context was initialized with n_parallel=%d. To use %d parallel slots, reinitialize the context with n_parallel >= %d",
-                n_parallel, n_seq_max, params.n_parallel, n_parallel, n_parallel);
-        throw std::runtime_error(error_msg);
-    }
-
-    // If parallel mode is already enabled, reconfigure it
-    if (parallel_mode_enabled) {
-        LOG_INFO("Reconfiguring parallel mode to %d slots, batch size %d", n_parallel, n_batch);
-        // Clean up existing slot manager
-        if (slot_manager != nullptr) {
-            delete slot_manager;
-            slot_manager = nullptr;
-        }
-    } else {
-        LOG_INFO("Enabling parallel mode with %d slots, batch size %d (n_seq_max=%u)", n_parallel, n_batch, n_seq_max);
-    }
-
-    // Create slot manager
-    slot_manager = new llama_rn_slot_manager(this);
-    if (!slot_manager->init(n_parallel, n_batch, n_ctx)) {
-        LOG_ERROR("Failed to initialize slot manager");
-        delete slot_manager;
-        slot_manager = nullptr;
-
-        char error_msg[256];
-        snprintf(error_msg, sizeof(error_msg),
-                "Failed to initialize slot manager with %d slots and batch size %d",
-                n_parallel, n_batch);
-        throw std::runtime_error(error_msg);
-    }
-
-    parallel_mode_enabled = true;
-
-    LOG_INFO("Parallel mode enabled successfully with %d slots", n_parallel);
-}
-
-// Disable parallel decoding mode
-void llama_rn_context::disableParallelMode() {
-    if (!parallel_mode_enabled) {
-        return;
-    }
-
-    LOG_INFO("Disabling parallel mode");
-
-    if (slot_manager != nullptr) {
-        delete slot_manager;
-        slot_manager = nullptr;
-    }
-
-    parallel_mode_enabled = false;
-
-    LOG_INFO("Parallel mode disabled");
-}
-
 void llama_rn_context::clearCache(bool clear_data) {
     if (ctx == nullptr) {
         LOG_WARNING("Cannot clear cache: context not initialized");
@@ -557,14 +238,7 @@ void llama_rn_context::clearCache(bool clear_data) {
     }
 
     llama_memory_clear(kv, clear_data);
-
-    if (completion != nullptr) {
-        completion->embd.clear();
-        completion->n_past = 0;
-        LOG_INFO("Cache cleared and completion state reset (clear_data=%s)", clear_data ? "true" : "false");
-    } else {
-        LOG_INFO("Cache cleared (clear_data=%s)", clear_data ? "true" : "false");
-    }
+    LOG_INFO("Cache cleared (clear_data=%s)", clear_data ? "true" : "false");
 }
 
 }

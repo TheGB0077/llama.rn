@@ -1,274 +1,159 @@
 #include "rn-tts.h"
 #include "rn-llama.h"
-#include "anyascii.h"
 #include "common.h"
 #include "codec.h"
 #include <regex>
-#include <map>
 #include <sstream>
-#include <iomanip>
 #include <algorithm>
-#include <codecvt>
-#include <locale>
 
 namespace rnllama {
 
-// Constants definitions
-const std::string default_audio_text = "<|text_start|>the<|text_sep|>overall<|text_sep|>package<|text_sep|>from<|text_sep|>just<|text_sep|>two<|text_sep|>people<|text_sep|>is<|text_sep|>pretty<|text_sep|>remarkable<|text_sep|>sure<|text_sep|>i<|text_sep|>have<|text_sep|>some<|text_sep|>critiques<|text_sep|>about<|text_sep|>some<|text_sep|>of<|text_sep|>the<|text_sep|>gameplay<|text_sep|>aspects<|text_sep|>but<|text_sep|>its<|text_sep|>still<|text_sep|>really<|text_sep|>enjoyable<|text_sep|>and<|text_sep|>it<|text_sep|>looks<|text_sep|>lovely<|text_sep|>";
+static std::string text_normalization(const std::string &input) {
+    std::string result = std::regex_replace(input, std::regex("\\s+"), " ");
+    result = std::regex_replace(result, std::regex("\\…"), "...");
+    result = std::regex_replace(result, std::regex("\\s+$|^\\s+"), "");
 
-const std::string default_audio_data = R"(<|audio_start|>
-the<|t_0.08|><|code_start|><|257|><|740|><|636|><|913|><|788|><|1703|><|code_end|>
-overall<|t_0.36|><|code_start|><|127|><|201|><|191|><|774|><|700|><|532|><|1056|><|557|><|798|><|298|><|1741|><|747|><|1662|><|1617|><|1702|><|1527|><|368|><|1588|><|1049|><|1008|><|1625|><|747|><|1576|><|728|><|1019|><|1696|><|1765|><|code_end|>
-package<|t_0.56|><|code_start|><|935|><|584|><|1319|><|627|><|1016|><|1491|><|1344|><|1117|><|1526|><|1040|><|239|><|1435|><|951|><|498|><|723|><|1180|><|535|><|789|><|1649|><|1637|><|78|><|465|><|1668|><|901|><|595|><|1675|><|117|><|1009|><|1667|><|320|><|840|><|79|><|507|><|1762|><|1508|><|1228|><|1768|><|802|><|1450|><|1457|><|232|><|639|><|code_end|>
-from<|t_0.19|><|code_start|><|604|><|782|><|1682|><|872|><|1532|><|1600|><|1036|><|1761|><|647|><|1554|><|1371|><|653|><|1595|><|950|><|code_end|>
-just<|t_0.25|><|code_start|><|1782|><|1670|><|317|><|786|><|1748|><|631|><|599|><|1155|><|1364|><|1524|><|36|><|1591|><|889|><|1535|><|541|><|440|><|1532|><|50|><|870|><|code_end|>
-two<|t_0.24|><|code_start|><|1681|><|1510|><|673|><|799|><|805|><|1342|><|330|><|519|><|62|><|640|><|1138|><|565|><|1552|><|1497|><|1552|><|572|><|1715|><|1732|><|code_end|>
-people<|t_0.39|><|code_start|><|593|><|274|><|136|><|740|><|691|><|633|><|1484|><|1061|><|1138|><|1485|><|344|><|428|><|397|><|1562|><|645|><|917|><|1035|><|1449|><|1669|><|487|><|442|><|1484|><|1329|><|1832|><|1704|><|600|><|761|><|653|><|269|><|code_end|>
-is<|t_0.16|><|code_start|><|566|><|583|><|1755|><|646|><|1337|><|709|><|802|><|1008|><|485|><|1583|><|652|><|10|><|code_end|>
-pretty<|t_0.32|><|code_start|><|1818|><|1747|><|692|><|733|><|1010|><|534|><|406|><|1697|><|1053|><|1521|><|1355|><|1274|><|816|><|1398|><|211|><|1218|><|817|><|1472|><|1703|><|686|><|13|><|822|><|445|><|1068|><|code_end|>
-remarkable<|t_0.68|><|code_start|><|230|><|1048|><|1705|><|355|><|706|><|1149|><|1535|><|1787|><|1356|><|1396|><|835|><|1583|><|486|><|1249|><|286|><|937|><|1076|><|1150|><|614|><|42|><|1058|><|705|><|681|><|798|><|934|><|490|><|514|><|1399|><|572|><|1446|><|1703|><|1346|><|1040|><|1426|><|1304|><|664|><|171|><|1530|><|625|><|64|><|1708|><|1830|><|1030|><|443|><|1509|><|1063|><|1605|><|1785|><|721|><|1440|><|923|><|code_end|>
-sure<|t_0.36|><|code_start|><|792|><|1780|><|923|><|1640|><|265|><|261|><|1525|><|567|><|1491|><|1250|><|1730|><|362|><|919|><|1766|><|543|><|1|><|333|><|113|><|970|><|252|><|1606|><|133|><|302|><|1810|><|1046|><|1190|><|1675|><|code_end|>
-i<|t_0.08|><|code_start|><|123|><|439|><|1074|><|705|><|1799|><|637|><|code_end|>
-have<|t_0.16|><|code_start|><|1509|><|599|><|518|><|1170|><|552|><|1029|><|1267|><|864|><|419|><|143|><|1061|><|0|><|code_end|>
-some<|t_0.16|><|code_start|><|619|><|400|><|1270|><|62|><|1370|><|1832|><|917|><|1661|><|167|><|269|><|1366|><|1508|><|code_end|>
-critiques<|t_0.60|><|code_start|><|559|><|584|><|1163|><|1129|><|1313|><|1728|><|721|><|1146|><|1093|><|577|><|928|><|27|><|630|><|1080|><|1346|><|1337|><|320|><|1382|><|1175|><|1682|><|1556|><|990|><|1683|><|860|><|1721|><|110|><|786|><|376|><|1085|><|756|><|1523|><|234|><|1334|><|1506|><|1578|><|659|><|612|><|1108|><|1466|><|1647|><|308|><|1470|><|746|><|556|><|1061|><|code_end|>
-about<|t_0.29|><|code_start|><|26|><|1649|><|545|><|1367|><|1263|><|1728|><|450|><|859|><|1434|><|497|><|1220|><|1285|><|179|><|755|><|1154|><|779|><|179|><|1229|><|1213|><|922|><|1774|><|1408|><|code_end|>
-some<|t_0.23|><|code_start|><|986|><|28|><|1649|><|778|><|858|><|1519|><|1|><|18|><|26|><|1042|><|1174|><|1309|><|1499|><|1712|><|1692|><|1516|><|1574|><|code_end|>
-of<|t_0.07|><|code_start|><|197|><|716|><|1039|><|1662|><|64|><|code_end|>
-the<|t_0.08|><|code_start|><|1811|><|1568|><|569|><|886|><|1025|><|1374|><|code_end|>
-gameplay<|t_0.48|><|code_start|><|1269|><|1092|><|933|><|1362|><|1762|><|1700|><|1675|><|215|><|781|><|1086|><|461|><|838|><|1022|><|759|><|649|><|1416|><|1004|><|551|><|909|><|787|><|343|><|830|><|1391|><|1040|><|1622|><|1779|><|1360|><|1231|><|1187|><|1317|><|76|><|997|><|989|><|978|><|737|><|189|><|code_end|>
-aspects<|t_0.56|><|code_start|><|1423|><|797|><|1316|><|1222|><|147|><|719|><|1347|><|386|><|1390|><|1558|><|154|><|440|><|634|><|592|><|1097|><|1718|><|712|><|763|><|1118|><|1721|><|1311|><|868|><|580|><|362|><|1435|><|868|><|247|><|221|><|886|><|1145|><|1274|><|1284|><|457|><|1043|><|1459|><|1818|><|62|><|599|><|1035|><|62|><|1649|><|778|><|code_end|>
-but<|t_0.20|><|code_start|><|780|><|1825|><|1681|><|1007|><|861|><|710|><|702|><|939|><|1669|><|1491|><|613|><|1739|><|823|><|1469|><|648|><|code_end|>
-its<|t_0.09|><|code_start|><|92|><|688|><|1623|><|962|><|1670|><|527|><|599|><|code_end|>
-still<|t_0.27|><|code_start|><|636|><|10|><|1217|><|344|><|713|><|957|><|823|><|154|><|1649|><|1286|><|508|><|214|><|1760|><|1250|><|456|><|1352|><|1368|><|921|><|615|><|5|><|code_end|>
-really<|t_0.36|><|code_start|><|55|><|420|><|1008|><|1659|><|27|><|644|><|1266|><|617|><|761|><|1712|><|109|><|1465|><|1587|><|503|><|1541|><|619|><|197|><|1019|><|817|><|269|><|377|><|362|><|1381|><|507|><|1488|><|4|><|1695|><|code_end|>
-enjoyable<|t_0.49|><|code_start|><|678|><|501|><|864|><|319|><|288|><|1472|><|1341|><|686|><|562|><|1463|><|619|><|1563|><|471|><|911|><|730|><|1811|><|1006|><|520|><|861|><|1274|><|125|><|1431|><|638|><|621|><|153|><|876|><|1770|><|437|><|987|><|1653|><|1109|><|898|><|1285|><|80|><|593|><|1709|><|843|><|code_end|>
-and<|t_0.15|><|code_start|><|1285|><|987|><|303|><|1037|><|730|><|1164|><|502|><|120|><|1737|><|1655|><|1318|><|code_end|>
-it<|t_0.09|><|code_start|><|848|><|1366|><|395|><|1601|><|1513|><|593|><|1302|><|code_end|>
-looks<|t_0.27|><|code_start|><|1281|><|1266|><|1755|><|572|><|248|><|1751|><|1257|><|695|><|1380|><|457|><|659|><|585|><|1315|><|1105|><|1776|><|736|><|24|><|736|><|654|><|1027|><|code_end|>
-lovely<|t_0.56|><|code_start|><|634|><|596|><|1766|><|1556|><|1306|><|1285|><|1481|><|1721|><|1123|><|438|><|1246|><|1251|><|795|><|659|><|1381|><|1658|><|217|><|1772|><|562|><|952|><|107|><|1129|><|1112|><|467|><|550|><|1079|><|840|><|1615|><|1469|><|1380|><|168|><|917|><|836|><|1827|><|437|><|583|><|67|><|595|><|1087|><|1646|><|1493|><|1677|><|code_end|>)";
-
-const char *OUTETTS_V1_GRAMMAR = R"(
-root       ::= NL? wordAudioBlock+ audioEnd NL eos?
-wordAudioBlock ::= WORD codeBlock NL
-codeBlock ::= TIME CODE*
- eos      ::= "<|im_end|>"
-codeStart ::= "<|code_start|>"
-codeEnd ::= "<|code_end|>"
-audioEnd   ::= "<|audio_end|>"
-WORD       ::= [A-Za-z]+
-NL         ::= [\n]
-TIME  ::= "<|t_" DECIMAL "|>"
-CODE    ::= "<|" DIGITS "|>"
-DIGITS     ::= [0-9]+
-DECIMAL    ::= [0-9]+ "." [0-9]+
-)";
-
-const char *OUTETTS_V2_GRAMMAR = R"(
-root       ::= NL? content+ audioEnd NL eos?
-content ::= wordAudioBlock | emotionBlock
-wordAudioBlock ::= WORD punch* codeBlock space NL
-codeBlock ::= TIME CODE*
-emotionBlock ::= emotionStart TEXT emotionEnd space NL
-TEXT ::= [A-Za-z0-9 .,?!]+
- eos      ::= "<|im_end|>"
-emotionStart ::= "<|emotion_start|>"
-emotionEnd ::= "<|emotion_end|>"
-audioEnd   ::= "<|audio_end|>"
-space      ::= "<|space|>"
-WORD       ::= [A-Za-z]+
-NL         ::= [\n]
-TIME  ::= "<|t_" DECIMAL "|>"
-CODE    ::= "<|" DIGITS "|>"
-DIGITS     ::= [0-9]+
-DECIMAL    ::= [0-9]+ "." [0-9]+
-punch ::= "<|" [a-z_]+ "|>"
-)";
-
-// Number conversion maps and functions
-static const std::map<int, std::string> ones = {
-    {0, "zero"}, {1, "one"}, {2, "two"}, {3, "three"}, {4, "four"},
-    {5, "five"}, {6, "six"}, {7, "seven"}, {8, "eight"}, {9, "nine"},
-    {10, "ten"}, {11, "eleven"}, {12, "twelve"}, {13, "thirteen"}, {14, "fourteen"},
-    {15, "fifteen"}, {16, "sixteen"}, {17, "seventeen"}, {18, "eighteen"}, {19, "nineteen"}
-};
-
-static const std::map<int, std::string> tens = {
-    {2, "twenty"}, {3, "thirty"}, {4, "forty"}, {5, "fifty"},
-    {6, "sixty"}, {7, "seventy"}, {8, "eighty"}, {9, "ninety"}
-};
-
-// Convert a number less than 1000 to words
-static std::string convert_less_than_thousand(int num) {
-    std::string result;
-
-    if (num >= 100) {
-        result += ones.at(num / 100) + " hundred ";
-        num %= 100;
-    }
-
-    if (num >= 20) {
-        result += tens.at(num / 10);
-        if (num % 10 > 0) {
-            result += "-" + ones.at(num % 10);
+    static const std::pair<std::string, std::string> patterns[] = {
+        {"\u201C", "\""}, {"\u201D", "\""},
+        {"\u2018", "'"},  {"\u2019", "'"},
+        {"\u2013", "-"},  {"\u2014", "-"},
+    };
+    for (const auto &p : patterns) {
+        size_t pos = 0;
+        while ((pos = result.find(p.first, pos)) != std::string::npos) {
+            result.replace(pos, p.first.length(), p.second);
+            pos += p.second.length();
         }
-    } else if (num > 0) {
-        result += ones.at(num);
     }
-
     return result;
 }
 
-std::string number_to_words(const std::string & number_str) {
-    try {
-        size_t decimal_pos = number_str.find('.');
-        std::string integer_part = number_str.substr(0, decimal_pos);
-
-        int int_number = std::stoi(integer_part);
-        std::string result;
-
-        if (int_number == 0) {
-            result = "zero";
-        } else {
-            if (int_number >= 1000000000) {
-                int billions = int_number / 1000000000;
-                result += convert_less_than_thousand(billions) + " billion ";
-                int_number %= 1000000000;
-            }
-
-            if (int_number >= 1000000) {
-                int millions = int_number / 1000000;
-                result += convert_less_than_thousand(millions) + " million ";
-                int_number %= 1000000;
-            }
-
-            if (int_number >= 1000) {
-                int thousands = int_number / 1000;
-                result += convert_less_than_thousand(thousands) + " thousand ";
-                int_number %= 1000;
-            }
-
-            if (int_number > 0) {
-                result += convert_less_than_thousand(int_number);
-            }
-        }
-
-        // Handle decimal part
-        if (decimal_pos != std::string::npos) {
-            result += " point";
-            std::string decimal_part = number_str.substr(decimal_pos + 1);
-            for (char digit : decimal_part) {
-                result += " " + ones.at(digit - '0');
-            }
-        }
-
-        return result;
-    } catch (const std::exception& e) {
-        // Skip if fails
-        return " ";
-    }
+static std::string format_special(const std::string &tmpl, int value) {
+    size_t pos = tmpl.find("{}");
+    if (pos == std::string::npos) return tmpl;
+    return tmpl.substr(0, pos) + std::to_string(value) + tmpl.substr(pos + 2);
 }
 
-std::string replace_numbers_with_words(const std::string & input_text) {
-    std::regex number_pattern(R"(\d+(\.\d+)?)");
+static std::string format_special(const std::string &tmpl, double value) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.2f", value);
+    size_t pos = tmpl.find("{}");
+    if (pos == std::string::npos) return tmpl;
+    return tmpl.substr(0, pos) + buf + tmpl.substr(pos + 2);
+}
+
+struct SpecialTokens {
+    std::string bos = "<|im_start|>";
+    std::string text_start = "<|text_start|>";
+    std::string text_end = "<|text_end|>";
+    std::string audio_start = "<|audio_start|>";
+    std::string audio_end = "<|audio_end|>";
+    std::string word_start = "<|word_start|>";
+    std::string word_end = "<|word_end|>";
+    std::string c1 = "<|c1_{}|>";
+    std::string c2 = "<|c2_{}|>";
+    std::string time = "<|t_{}|>";
+    std::string code = "<|code|>";
+    std::string features = "<|features|>";
+    std::string energy = "<|energy_{}|>";
+    std::string spectral_centroid = "<|spectral_centroid_{}|>";
+    std::string pitch = "<|pitch_{}|>";
+    std::string global_features_start = "<|global_features_start|>";
+    std::string global_features_end = "<|global_features_end|>";
+};
+
+static std::string create_codes(const json &words, const SpecialTokens &st) {
     std::string result;
-    auto it = std::sregex_iterator(input_text.begin(), input_text.end(), number_pattern);
-    auto end = std::sregex_iterator();
+    for (size_t i = 0; i < words.size(); i++) {
+        const auto &w = words[i];
+        std::string entry = st.word_start;
+        entry += w["word"].get<std::string>() + st.features;
+        entry += format_special(st.time, w["duration"].get<float>());
 
-    size_t last_pos = 0;
-    for (std::sregex_iterator i = it; i != end; ++i) {
-        const std::smatch& match = *i;
-        result.append(input_text, last_pos, match.position() - last_pos);
-        result.append(number_to_words(match.str()));
-        last_pos = match.position() + match.length();
+        if (w.contains("features") && w["features"].is_object()) {
+            const auto &f = w["features"];
+            if (f.contains("energy")) entry += format_special(st.energy, f["energy"].get<int>());
+            if (f.contains("spectral_centroid")) entry += format_special(st.spectral_centroid, f["spectral_centroid"].get<int>());
+            if (f.contains("pitch")) entry += format_special(st.pitch, f["pitch"].get<int>());
+        }
+
+        entry += st.code;
+        if (w.contains("c1") && w.contains("c2")) {
+            size_t n = std::min(w["c1"].size(), w["c2"].size());
+            for (size_t idx = 0; idx < n; idx++) {
+                entry += format_special(st.c1, w["c1"][idx].get<int>());
+                entry += format_special(st.c2, w["c2"][idx].get<int>());
+            }
+        }
+
+        entry += st.word_end;
+        result += entry;
+        if (i < words.size() - 1) result += "\n";
     }
-    result.append(input_text, last_pos);
-
     return result;
 }
 
-static std::string anyascii_string(const std::string &input) {
-    std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
-    auto wstr = converter.from_bytes(input);
-    std::string output;
-    for (char32_t c : wstr) {
-        const char *r;
-        size_t rlen = anyascii(c, &r);
-        output.append(r, rlen);
+static std::string get_separator(const std::string &text) {
+    for (unsigned char c : text) {
+        if (c >= 0xE3) return "\u3002";
+        if (c >= 0xEA) return ". ";
+        if (c >= 0xE4 && c <= 0xE9) return "\u3002";
     }
+    return ". ";
+}
+
+static std::string merge_speaker_text(const std::string &input_text, const std::string &speaker_text) {
+    std::string st = speaker_text;
+    st = std::regex_replace(st, std::regex("\\s+$|^\\s+"), "");
+
+    if (st.empty()) return input_text;
+
+    std::string sep = get_separator(st);
+    bool ends_ok = false;
+    if (sep == "\u3002") {
+        for (auto &e : {"\u3002", "\uFF1F", "\uFF01", "?", "!"}) {
+            if (st.size() >= 1 && st.compare(st.size() - 1, 1, e) == 0) { ends_ok = true; break; }
+            if (st.size() >= 3 && st.compare(st.size() - 3, 3, e) == 0) { ends_ok = true; break; }
+        }
+    } else {
+        for (auto &e : {".", "?", "!"}) {
+            if (st.size() >= 1 && st.compare(st.size() - 1, 1, e) == 0) { ends_ok = true; break; }
+        }
+    }
+
+    std::string rs = ends_ok ? "" : (sep == "\u3002" ? "" : " ");
+    std::string output = st + rs + input_text;
+    std::string trimmed_rs = std::regex_replace(rs, std::regex("^\\s+|\\s+$"), "");
     return output;
 }
 
-std::string process_text(const std::string & text, const tts_type tts_type) {
-    std::string processed_text = replace_numbers_with_words(text);
-
-    if (tts_type == OUTETTS_V0_2 || tts_type == OUTETTS_V0_3) {
-        processed_text = anyascii_string(processed_text);
-
-        std::regex dashes(R"([—–-])");
-        processed_text = std::regex_replace(processed_text, dashes, " ");
-    }
-
-    std::transform(processed_text.begin(), processed_text.end(),
-                  processed_text.begin(), ::tolower);
-
-    std::regex special_chars(R"([-_/,\.\\])");
-    processed_text = std::regex_replace(processed_text, special_chars, " ");
-
-    std::regex non_alpha(R"([^a-z\s])");
-    processed_text = std::regex_replace(processed_text, non_alpha, "");
-
-    std::regex multiple_spaces(R"(\s+)");
-    processed_text = std::regex_replace(processed_text, multiple_spaces, " ");
-
-    processed_text = std::regex_replace(processed_text, std::regex(R"(^\s+|\s+$)"), "");
-
-    std::string separator = (tts_type == OUTETTS_V0_3) ? "<|space|>" : "<|text_sep|>";
-    processed_text = std::regex_replace(processed_text, std::regex(R"(\s)"), separator);
-
-    return processed_text;
+static std::string init_prompt(const std::string &text, const SpecialTokens &st) {
+    return st.bos + "\n" + st.text_start + text + st.text_end + "\n" + st.audio_start + "\n";
 }
 
-std::string audio_text_from_speaker(json speaker, const tts_type type) {
-    std::string audio_text = "<|text_start|>";
+static std::string get_completion_prompt(const std::string &text, json &speaker) {
+    SpecialTokens st;
+    std::string normalized = text_normalization(text);
 
-    if (type == OUTETTS_V0_2 || type == OUTETTS_V0_3) {
-        std::string separator = (type == OUTETTS_V0_3) ? "<|space|>" : "<|text_sep|>";
-        for (const auto &word : speaker["words"]) {
-            audio_text += word["word"].get<std::string>() + separator;
-        }
+    std::string prompt;
+    if (speaker.is_object() && speaker.contains("words") && speaker["words"].is_array()) {
+        std::string spk_text = speaker.contains("text") ? speaker["text"].get<std::string>() : "";
+        normalized = merge_speaker_text(normalized, spk_text);
+        prompt = init_prompt(normalized, st);
+        prompt += create_codes(speaker["words"], st) + "\n" + st.word_start;
+    } else {
+        prompt = init_prompt(normalized, st);
     }
-
-    return audio_text;
+    return prompt;
 }
 
-std::string audio_data_from_speaker(json speaker, const tts_type type) {
-    std::string audio_data = "<|audio_start|>\n";
+extern bool rnllama_verbose;
+void log(const char *level, const char *function, int line, const char *format, ...);
 
-    if (type == OUTETTS_V0_2 || type == OUTETTS_V0_3) {
-        std::string code_start = (type == OUTETTS_V0_3) ? "" : "<|code_start|>";
-        std::string code_end = (type == OUTETTS_V0_3) ? "<|space|>" : "<|code_end|>";
-        for (const auto &word : speaker["words"]) {
-            std::string word_text = word["word"].get<std::string>();
-            double duration = word["duration"].get<double>();
-            std::vector<int> codes = word["codes"].get<std::vector<int>>();
+#define LOG_ERROR(MSG, ...) log("ERROR", __func__, __LINE__, MSG, ##__VA_ARGS__)
+#define LOG_WARNING(MSG, ...) log("WARNING", __func__, __LINE__, MSG, ##__VA_ARGS__)
+#define LOG_INFO(MSG, ...) log("INFO", __func__, __LINE__, MSG, ##__VA_ARGS__)
 
-            // Create the audio output entry
-            std::ostringstream word_entry;
-            word_entry << word_text << "<|t_" << std::fixed << std::setprecision(2)
-                       << duration << "|>" + code_start;
-            for (const auto &Code : codes) {
-                word_entry << "<|" << Code << "|>";
-            }
-            word_entry << code_end << "\n";
-            audio_data += word_entry.str();
-        }
-    }
-
-    return audio_data;
-}
-
-// Constructor and destructor implementations
 llama_rn_context_tts::llama_rn_context_tts(const std::string &vocoder_model_path, int /* batch_size */) {
   struct codec_model_params model_params = codec_model_default_params();
   codec_model = codec_model_load_from_file(vocoder_model_path.c_str(), model_params);
@@ -284,7 +169,7 @@ llama_rn_context_tts::llama_rn_context_tts(const std::string &vocoder_model_path
       throw std::runtime_error("Failed to initialize codec context");
   }
 
-  type = UNKNOWN; // Will be determined when used
+  type = UNKNOWN;
 }
 
 llama_rn_context_tts::~llama_rn_context_tts() {
@@ -303,103 +188,59 @@ void llama_rn_context_tts::setGuideTokens(const std::vector<llama_token> &tokens
     guide_tokens = tokens;
 }
 
-// Forward declarations from rn-llama.h
-extern bool rnllama_verbose;
-void log(const char *level, const char *function, int line, const char *format, ...);
-
-#define LOG_ERROR(MSG, ...) log("ERROR", __func__, __LINE__, MSG, ##__VA_ARGS__)
-#define LOG_WARNING(MSG, ...) log("WARNING", __func__, __LINE__, MSG, ##__VA_ARGS__)
-#define LOG_INFO(MSG, ...) log("INFO", __func__, __LINE__, MSG, ##__VA_ARGS__)
-
-// TTS member functions
-tts_type llama_rn_context_tts::getTTSType(llama_rn_context* main_ctx, json speaker) {
-    if (speaker.is_object() && speaker.contains("version")) {
-        std::string version = speaker["version"].get<std::string>();
-        if (version == "0.2") {
-            return OUTETTS_V0_2;
-        } else if (version == "0.3") {
-            return OUTETTS_V0_3;
-        } else {
-            LOG_ERROR("Unsupported speaker version '%s'\n", version.c_str());
-        }
+void llama_rn_context_tts::resolveTokenIds(llama_rn_context* main_ctx) {
+    if (token_ids_resolved) return;
+    const llama_vocab * vocab = llama_model_get_vocab(main_ctx->model);
+    for (int i = 0; i < (int)llama_vocab_n_tokens(vocab); i++) {
+        std::string piece = common_token_to_piece(vocab, (llama_token)i);
+        if (piece == "<|c1_0|>") { c1_0_token_id = i; }
+        else if (piece == "<|c2_0|>") { c2_0_token_id = i; }
+        else if (piece == "<|audio_end|>") { audio_end_token_id = i; }
     }
-    if (type != UNKNOWN) {
+    token_ids_resolved = true;
+    LOG_INFO("Resolved token IDs: c1_0=%d, c2_0=%d, audio_end=%d", c1_0_token_id, c2_0_token_id, audio_end_token_id);
+}
+
+tts_type llama_rn_context_tts::getTTSType(llama_rn_context* main_ctx) {
+    if (type != UNKNOWN) return type;
+    resolveTokenIds(main_ctx);
+    if (c1_0_token_id >= 0 && c2_0_token_id >= 0) {
+        type = OUTETTS_V1_0;
         return type;
     }
-    const char *chat_template = llama_model_chat_template(main_ctx->model, nullptr);
-    if (chat_template && std::string(chat_template) == "outetts-0.3") {
-        return OUTETTS_V0_3;
-    }
-    if (main_ctx->model->name.find("OuteTTS 0.1") != std::string::npos) {
-        return OUTETTS_V0_1;
-    }
-    return OUTETTS_V0_2;
+    LOG_ERROR("Unknown TTS type — could not find c1/c2 token IDs");
+    return UNKNOWN;
 }
 
 llama_rn_audio_completion_result llama_rn_context_tts::getFormattedAudioCompletion(llama_rn_context* main_ctx, const std::string &speaker_json_str, const std::string &text_to_speak) {
-    std::string audio_text = default_audio_text;
-    std::string audio_data = default_audio_data;
-
     json speaker = speaker_json_str.empty() ? json::object() : json::parse(speaker_json_str);
-    const tts_type tts_type = getTTSType(main_ctx, speaker);
-    if (tts_type == UNKNOWN) {
+
+    tts_type tts_t = getTTSType(main_ctx);
+    if (tts_t == UNKNOWN) {
         LOG_ERROR("Unknown TTS version");
-        return {"", nullptr};
+        return {"", ""};
     }
 
-    if (tts_type == OUTETTS_V0_3) {
-        audio_text = std::regex_replace(audio_text, std::regex(R"(<\|text_sep\|>)"), "<|space|>");
-        audio_data = std::regex_replace(audio_data, std::regex(R"(<\|code_start\|>)"), "");
-        audio_data = std::regex_replace(audio_data, std::regex(R"(<\|code_end\|>)"), "<|space|>");
-    }
+    json spk_copy = speaker;
+    std::string prompt = get_completion_prompt(text_to_speak, spk_copy);
 
-    if (!speaker_json_str.empty()) {
-        audio_text = audio_text_from_speaker(speaker, tts_type);
-        audio_data = audio_data_from_speaker(speaker, tts_type);
-    }
-
-    std::string prompt = "<|im_start|>\n" + audio_text + process_text(text_to_speak, tts_type) + "<|text_end|>\n" + audio_data + "\n";
-
-    if (tts_type == OUTETTS_V0_1) {
-        return {prompt, OUTETTS_V1_GRAMMAR};
-    } else if (tts_type == OUTETTS_V0_2 || tts_type == OUTETTS_V0_3) {
-        return {prompt, OUTETTS_V2_GRAMMAR};
-    } else {
-        return {prompt, nullptr};
-    }
+    return {prompt, ""};
 }
 
 std::vector<llama_token> llama_rn_context_tts::getAudioCompletionGuideTokens(llama_rn_context* main_ctx, const std::string &text_to_speak) {
     const llama_vocab * vocab = llama_model_get_vocab(main_ctx->model);
-    const tts_type tts_type = getTTSType(main_ctx);
-    std::string clean_text = process_text(text_to_speak, tts_type);
-
-    const std::string& delimiter = (tts_type == OUTETTS_V0_3 ? "<|space|>" : "<|text_sep|>");
+    std::string normalized = text_normalization(text_to_speak);
 
     std::vector<llama_token> result;
-    size_t start = 0;
-    size_t end = clean_text.find(delimiter);
 
-    //first token is always a newline, as it was not previously added
-    result.push_back(common_tokenize(vocab, "\n", false, true)[0]);
-
-    while (end != std::string::npos) {
-        std::string current_word = clean_text.substr(start, end - start);
-        auto tmp = common_tokenize(vocab, current_word, false, true);
-        result.push_back(tmp[0]);
-        start = end + delimiter.length();
-        end = clean_text.find(delimiter, start);
+    std::vector<llama_token> text_tokens = common_tokenize(vocab, normalized, false, true);
+    for (auto tok : text_tokens) {
+        result.push_back(tok);
     }
 
-    // Add the last part
-    std::string current_word = clean_text.substr(start);
-    auto tmp = common_tokenize(vocab, current_word, false, true);
-    if (tmp.size() > 0) {
-        result.push_back(tmp[0]);
+    if (audio_end_token_id >= 0) {
+        result.push_back(audio_end_token_id);
     }
-
-    // Add Audio End, forcing stop generation
-    result.push_back(common_tokenize(vocab, "<|audio_end|>", false, true)[0]);
 
     return result;
 }
@@ -410,39 +251,60 @@ std::vector<float> llama_rn_context_tts::decodeAudioTokens(llama_rn_context* mai
         return std::vector<float>();
     }
 
-    std::vector<llama_token> tokens_audio = tokens;
-    tts_type tts_type = getTTSType(main_ctx);
-    if (tts_type == OUTETTS_V0_3 || tts_type == OUTETTS_V0_2) {
-        tokens_audio.erase(std::remove_if(tokens_audio.begin(), tokens_audio.end(), [](llama_token t) { return t < 151672 || t > 155772; }), tokens_audio.end());
-        for (auto & token : tokens_audio) {
-            token -= 151672;
+    resolveTokenIds(main_ctx);
+
+    std::vector<int> codebook1;
+    std::vector<int> codebook2;
+
+    int codebook_size = codec_model_codebook_size(codec_model);
+    int c1_last = c1_0_token_id + codebook_size - 1;
+    int c2_last = c2_0_token_id + codebook_size - 1;
+
+    LOG_INFO("[decodeAudio] tokens=%zu c1_0=%d c2_0=%d codebook_size=%d c1_range=[%d,%d] c2_range=[%d,%d]",
+        tokens.size(), c1_0_token_id, c2_0_token_id, codebook_size,
+        c1_0_token_id, c1_last, c2_0_token_id, c2_last);
+
+    for (auto tok : tokens) {
+        if (tok >= c1_0_token_id && tok <= c1_last) {
+            codebook1.push_back(tok - c1_0_token_id);
+        } else if (tok >= c2_0_token_id && tok <= c2_last) {
+            codebook2.push_back(tok - c2_0_token_id);
         }
-    } else {
-        LOG_ERROR("Unsupported audio tokens");
+    }
+
+    LOG_INFO("[decodeAudio] codebook1=%zu codebook2=%zu first_5_tokens:", codebook1.size(), codebook2.size());
+    for (size_t i = 0; i < std::min((size_t)10, tokens.size()); i++) {
+        LOG_INFO("[decodeAudio]   token[%zu]=%d", i, tokens[i]);
+    }
+
+    size_t n_frames = std::min(codebook1.size(), codebook2.size());
+    codebook1.resize(n_frames);
+    codebook2.resize(n_frames);
+
+    if (n_frames == 0) {
+        LOG_ERROR("[decodeAudio] n_frames=0, no matching tokens");
         return std::vector<float>();
     }
 
-    if (tokens_audio.empty()) {
-        return std::vector<float>();
+    const int n_q = 2;
+    std::vector<int32_t> interleaved;
+    interleaved.reserve(n_frames * n_q);
+    for (size_t i = 0; i < n_frames; i++) {
+        interleaved.push_back(codebook1[i]);
+        interleaved.push_back(codebook2[i]);
     }
 
-    const int n_q = std::max(codec_model_n_q(codec_model), 1);
-    if ((int)tokens_audio.size() % n_q != 0) {
-        LOG_ERROR("Invalid audio token count: %zu is not divisible by n_q=%d", tokens_audio.size(), n_q);
-        return std::vector<float>();
-    }
-
-    std::vector<int32_t> codec_tokens(tokens_audio.begin(), tokens_audio.end());
     struct codec_token_buffer token_buffer = {};
-    token_buffer.data = codec_tokens.data();
-    token_buffer.n_tokens = (int32_t)codec_tokens.size();
-    token_buffer.n_frames = (int32_t)(codec_tokens.size() / n_q);
+    token_buffer.data = interleaved.data();
+    token_buffer.n_tokens = (int32_t)interleaved.size();
+    token_buffer.n_frames = (int32_t)n_frames;
     token_buffer.n_q = n_q;
-    token_buffer.codebook_size = codec_model_codebook_size(codec_model);
+    token_buffer.codebook_size = codebook_size;
     token_buffer.sample_rate = codec_model_sample_rate(codec_model);
     token_buffer.hop_size = codec_model_hop_size(codec_model);
 
     struct codec_decode_params decode_params = codec_decode_default_params();
+    decode_params.n_q = n_q;
     if (main_ctx->params.cpuparams.n_threads > 0) {
         decode_params.n_threads = main_ctx->params.cpuparams.n_threads;
     }
@@ -458,6 +320,17 @@ std::vector<float> llama_rn_context_tts::decodeAudioTokens(llama_rn_context* mai
     std::vector<float> audio(pcm.data, pcm.data + pcm.n_samples);
     codec_pcm_buffer_free(&pcm);
     return audio;
+}
+
+void llama_rn_context_tts::collectAudioToken(llama_rn_context* main_ctx, llama_token token) {
+    resolveTokenIds(main_ctx);
+    if (c1_0_token_id >= 0 && c2_0_token_id >= 0) {
+        int codebook_size = codec_model_codebook_size(codec_model);
+        if ((token >= c1_0_token_id && token <= c1_0_token_id + codebook_size - 1) ||
+            (token >= c2_0_token_id && token <= c2_0_token_id + codebook_size - 1)) {
+            audio_tokens.push_back(token);
+        }
+    }
 }
 
 }

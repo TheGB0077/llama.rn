@@ -21,14 +21,7 @@ namespace rnllama_jsi {
         const int max_threads = (int) std::thread::hardware_concurrency();
 
         int default_n_threads = 0;
-#if defined(LM_GGML_USE_HEXAGON)
-        default_n_threads = 6;
-        if (max_threads > 0) {
-            default_n_threads = int_min(default_n_threads, max_threads);
-        }
-#else
         default_n_threads = max_threads == 4 ? 2 : int_min(4, max_threads);
-#endif
 
         const int target_threads = (max_threads > 0 && n_threads > 0)
             ? int_min(n_threads, max_threads)
@@ -110,7 +103,6 @@ namespace rnllama_jsi {
     void parseCommonParams(jsi::Runtime& runtime, const jsi::Object& params, common_params& cparams) {
         cparams.fit_params = false;
 
-        // Model path
         cparams.model.path = getPropertyAsString(runtime, params, "model");
         cparams.vocab_only = getPropertyAsBool(runtime, params, "vocab_only", false);
         if (cparams.vocab_only) {
@@ -119,16 +111,11 @@ namespace rnllama_jsi {
 
         cparams.n_ctx = getPropertyAsInt(runtime, params, "n_ctx", cparams.n_ctx);
 
-        // For vocab_only models, ensure n_ctx is set because:
-        // 1. vocab_only models have n_ctx_train = 0 (no tensors loaded)
-        // 2. Context creation fails if both n_ctx and n_ctx_train are 0
-        // Use 512 as a minimal default - sufficient for tokenization
         if (cparams.vocab_only && cparams.n_ctx == 0) {
             cparams.n_ctx = 512;
         }
         cparams.n_batch = getPropertyAsInt(runtime, params, "n_batch", cparams.n_batch);
         cparams.n_ubatch = getPropertyAsInt(runtime, params, "n_ubatch", cparams.n_ubatch);
-        cparams.n_parallel = getPropertyAsInt(runtime, params, "n_parallel", cparams.n_parallel);
         cparams.cpuparams.n_threads = getPropertyAsInt(runtime, params, "n_threads", cparams.cpuparams.n_threads);
 
         std::string cpuMask = getPropertyAsString(runtime, params, "cpu_mask");
@@ -145,12 +132,6 @@ namespace rnllama_jsi {
             }
         }
         cparams.cpuparams.strict_cpu = getPropertyAsBool(runtime, params, "cpu_strict", cparams.cpuparams.strict_cpu);
-
-        // Chat template
-        std::string chatTemplate = getPropertyAsString(runtime, params, "chat_template");
-        if (!chatTemplate.empty()) {
-            cparams.chat_template = chatTemplate;
-        }
 
         cparams.use_mlock = getPropertyAsBool(runtime, params, "use_mlock", cparams.use_mlock);
         cparams.use_mmap = getPropertyAsBool(runtime, params, "use_mmap", cparams.use_mmap);
@@ -172,19 +153,6 @@ namespace rnllama_jsi {
         if (!cv.empty()) cparams.cache_type_v = rnllama::kv_cache_type_from_str(cv);
 
         cparams.ctx_shift = getPropertyAsBool(runtime, params, "ctx_shift", cparams.ctx_shift);
-        cparams.kv_unified = getPropertyAsBool(runtime, params, "kv_unified", cparams.kv_unified);
-        cparams.swa_full = getPropertyAsBool(runtime, params, "swa_full", cparams.swa_full);
-
-        if (params.hasProperty(runtime, "embedding") && getPropertyAsBool(runtime, params, "embedding")) {
-            cparams.embedding = true;
-            cparams.n_ubatch = cparams.n_batch; // Default for non-causal
-            cparams.embd_normalize = getPropertyAsInt(runtime, params, "embd_normalize", cparams.embd_normalize);
-        }
-
-        int pooling_type = getPropertyAsInt(runtime, params, "pooling_type", -1);
-        if (pooling_type >= 0) {
-            cparams.pooling_type = static_cast<enum llama_pooling_type>(pooling_type);
-        }
 
         cparams.rope_freq_base = getPropertyAsFloat(runtime, params, "rope_freq_base", cparams.rope_freq_base);
         cparams.rope_freq_scale = getPropertyAsFloat(runtime, params, "rope_freq_scale", cparams.rope_freq_scale);
@@ -198,38 +166,6 @@ namespace rnllama_jsi {
                 cparams.tensor_buft_overrides.push_back({buft_overrides.back().c_str(), lm_ggml_backend_cpu_buffer_type()});
             }
             cparams.tensor_buft_overrides.push_back({nullptr, nullptr});
-        }
-
-        // LoRA
-        if (params.hasProperty(runtime, "lora")) {
-            std::string loraPath = getPropertyAsString(runtime, params, "lora");
-            if (!loraPath.empty()) {
-                common_adapter_lora_info la;
-                la.path = loraPath;
-                la.scale = getPropertyAsFloat(runtime, params, "lora_scaled", 1.0f);
-                cparams.lora_adapters.push_back(la);
-            }
-        }
-
-        if (params.hasProperty(runtime, "lora_list")) {
-            jsi::Value loraListValue = params.getProperty(runtime, "lora_list");
-            if (loraListValue.isObject() && loraListValue.asObject(runtime).isArray(runtime)) {
-                jsi::Array loraList = loraListValue.asObject(runtime).asArray(runtime);
-                for (size_t i = 0; i < loraList.size(runtime); i++) {
-                    jsi::Value itemValue = loraList.getValueAtIndex(runtime, i);
-                    if (!itemValue.isObject()) {
-                        continue;
-                    }
-                    jsi::Object item = itemValue.asObject(runtime);
-                    std::string path = getPropertyAsString(runtime, item, "path");
-                    if (!path.empty()) {
-                        common_adapter_lora_info la;
-                        la.path = path;
-                        la.scale = getPropertyAsFloat(runtime, item, "scaled", 1.0f);
-                        cparams.lora_adapters.push_back(la);
-                    }
-                }
-            }
         }
     }
 
@@ -283,120 +219,7 @@ namespace rnllama_jsi {
 
         sparams.top_n_sigma = getPropertyAsDouble(runtime, params, "top_n_sigma", sparams.top_n_sigma);
 
-        // Grammar
         sparams.grammar = {};
-        sparams.generation_prompt.clear();
-        sparams.grammar_triggers.clear();
-        sparams.preserved_tokens.clear();
-        sparams.reasoning_budget_tokens = -1;
-        sparams.reasoning_budget_activate_immediately = false;
-        sparams.reasoning_budget_start.clear();
-        sparams.reasoning_budget_end.clear();
-        sparams.reasoning_budget_forced.clear();
-
-        std::string grammar = getPropertyAsString(runtime, params, "grammar");
-        if (!grammar.empty()) {
-            sparams.grammar = {COMMON_GRAMMAR_TYPE_USER, std::move(grammar)};
-        }
-
-        std::string jsonSchema = getPropertyAsString(runtime, params, "json_schema");
-        if (!jsonSchema.empty() && sparams.grammar.empty()) {
-            sparams.grammar = {COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT, json_schema_to_grammar(json::parse(jsonSchema))};
-        }
-
-        sparams.generation_prompt = getPropertyAsString(runtime, params, "generation_prompt");
-
-        const int thinkingBudgetTokens = getPropertyAsInt(runtime, params, "thinking_budget_tokens", -1);
-        if (thinkingBudgetTokens >= 0) {
-            const std::string thinkingEndTag = getPropertyAsString(runtime, params, "thinking_end_tag");
-            if (!thinkingEndTag.empty()) {
-                const std::string thinkingStartTag = getPropertyAsString(runtime, params, "thinking_start_tag");
-                const std::string thinkingBudgetMessage = getPropertyAsString(runtime, params, "thinking_budget_message");
-
-                if (!thinkingStartTag.empty()) {
-                    sparams.reasoning_budget_start = common_tokenize(
-                        ctx->ctx, thinkingStartTag, /* add_special= */ false, /* parse_special= */ true);
-                }
-                sparams.reasoning_budget_end = common_tokenize(
-                    ctx->ctx, thinkingEndTag, /* add_special= */ false, /* parse_special= */ true);
-                sparams.reasoning_budget_forced = common_tokenize(
-                    ctx->ctx, thinkingBudgetMessage + thinkingEndTag, /* add_special= */ false, /* parse_special= */ true);
-
-                if (!sparams.reasoning_budget_end.empty() && !sparams.reasoning_budget_forced.empty()) {
-                    sparams.reasoning_budget_tokens = thinkingBudgetTokens;
-                    sparams.reasoning_budget_activate_immediately = getPropertyAsBool(
-                        runtime, params, "thinking_forced_open", false);
-                } else {
-                    sparams.reasoning_budget_start.clear();
-                    sparams.reasoning_budget_end.clear();
-                    sparams.reasoning_budget_forced.clear();
-                }
-            }
-        }
-
-        sparams.grammar_lazy = getPropertyAsBool(runtime, params, "grammar_lazy", false);
-
-        if (params.hasProperty(runtime, "preserved_tokens")) {
-            auto preservedVal = params.getProperty(runtime, "preserved_tokens");
-            if (preservedVal.isObject() && preservedVal.asObject(runtime).isArray(runtime)) {
-                jsi::Array preserved = preservedVal.asObject(runtime).asArray(runtime);
-                for (size_t i = 0; i < preserved.size(runtime); ++i) {
-                    auto tokenVal = preserved.getValueAtIndex(runtime, i);
-                    if (!tokenVal.isString()) {
-                        continue;
-                    }
-                    std::string tokenStr = tokenVal.asString(runtime).utf8(runtime);
-                    auto ids = common_tokenize(ctx->ctx, tokenStr.c_str(), /* add_special= */ false, /* parse_special= */ true);
-                    if (ids.size() == 1) {
-                        sparams.preserved_tokens.insert(ids[0]);
-                    }
-                }
-            }
-        }
-
-        if (params.hasProperty(runtime, "grammar_triggers")) {
-            auto triggersVal = params.getProperty(runtime, "grammar_triggers");
-            if (triggersVal.isObject() && triggersVal.asObject(runtime).isArray(runtime)) {
-                jsi::Array triggers = triggersVal.asObject(runtime).asArray(runtime);
-                for (size_t i = 0; i < triggers.size(runtime); ++i) {
-                    auto triggerVal = triggers.getValueAtIndex(runtime, i);
-                    if (!triggerVal.isObject()) {
-                        continue;
-                    }
-                    jsi::Object triggerObj = triggerVal.asObject(runtime);
-                    auto type = static_cast<common_grammar_trigger_type>(getPropertyAsInt(runtime, triggerObj, "type", 0));
-                    std::string word = getPropertyAsString(runtime, triggerObj, "value");
-                    if (word.empty()) {
-                        continue;
-                    }
-
-                    if (type == COMMON_GRAMMAR_TRIGGER_TYPE_WORD) {
-                        auto ids = common_tokenize(ctx->ctx, word.c_str(), /* add_special= */ false, /* parse_special= */ true);
-                        if (ids.size() == 1) {
-                            const llama_token token = ids[0];
-                            if (sparams.preserved_tokens.find(token) == sparams.preserved_tokens.end()) {
-                                throw std::runtime_error("Grammar trigger word should be marked as preserved token");
-                            }
-                            common_grammar_trigger trigger;
-                            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
-                            trigger.value = word;
-                            trigger.token = token;
-                            sparams.grammar_triggers.push_back(std::move(trigger));
-                        } else {
-                            sparams.grammar_triggers.push_back({COMMON_GRAMMAR_TRIGGER_TYPE_WORD, word});
-                        }
-                    } else {
-                        common_grammar_trigger trigger;
-                        trigger.type = type;
-                        trigger.value = word;
-                        if (type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN) {
-                            trigger.token = (llama_token)getPropertyAsInt(runtime, triggerObj, "token", 0);
-                        }
-                        sparams.grammar_triggers.push_back(std::move(trigger));
-                    }
-                }
-            }
-        }
 
         // Logit bias
         sparams.logit_bias.clear();

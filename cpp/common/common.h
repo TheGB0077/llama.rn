@@ -276,18 +276,9 @@ struct common_params_sampling {
     std::vector<llama_logit_bias> logit_bias_eog; // pre-calculated logit biases for EOG tokens
 
     // The assistant generation prompt already prefilled into the prompt.
-    // Fed to the grammar sampler (to advance past pre-existing tokens) and used
-    // to determine the reasoning budget sampler's initial state.
+    // Fed to the grammar sampler (to advance past pre-existing tokens).
     // Only applied when the grammar is of output-format or tool-calls type.
     std::string generation_prompt;
-
-    // reasoning budget sampler parameters
-    // these are populated by the server/CLI based on chat template params
-    int32_t                  reasoning_budget_tokens   = -1;   // -1 = disabled, >= 0 = token budget
-    bool                     reasoning_budget_activate_immediately = false;
-    std::vector<llama_token> reasoning_budget_start;           // start tag token sequence
-    std::vector<llama_token> reasoning_budget_end;             // end tag token sequence
-    std::vector<llama_token> reasoning_budget_forced;          // forced sequence (message + end tag)
 
     bool backend_sampling = false;
 
@@ -596,10 +587,6 @@ struct common_params {
     bool use_jinja = true;                                                                                  // NOLINT
     bool enable_chat_template = true;
     bool force_pure_content_parser = false;
-    common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
-    int enable_reasoning = -1; // -1 = auto, 0 = disable, 1 = enable
-    int reasoning_budget = -1;
-    std::string reasoning_budget_message; // message injected before end tag when budget exhausted
     bool prefill_assistant = true; // if true, any trailing assistant message will be prefilled into the response
     int sleep_idle_seconds = -1;   // if >0, server will sleep after this many seconds of idle time
 

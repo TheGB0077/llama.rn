@@ -167,15 +167,11 @@ bool test_completion() {
             return false;
         }
 
-        // Test prompt loading
         std::string test_prompt = "Hello";
-        std::vector<std::string> empty_media;
 
-        // Set the prompt in params for loadPrompt to use
         ctx.params.prompt = test_prompt;
 
-        // Load the prompt
-        ctx.completion->loadPrompt(empty_media);
+        ctx.completion->loadPrompt();
 
         // Test completion setup
         ctx.completion->beginCompletion();

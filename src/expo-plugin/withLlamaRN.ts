@@ -19,8 +19,7 @@ interface PluginOptions {
   enableEntitlements?: boolean
   entitlementsProfile?: string | string[]
   forceCxx20?: boolean
-  enableOpenCLAndHexagon?: boolean
-  enableOpenCL?: boolean // Deprecated
+  enableOpenCL?: boolean
 }
 
 const withLlamaRn: ConfigPlugin<PluginOptions> = (config, options = {}) => {
@@ -28,15 +27,8 @@ const withLlamaRn: ConfigPlugin<PluginOptions> = (config, options = {}) => {
     enableEntitlements = true,
     entitlementsProfile = 'production',
     forceCxx20 = true,
-    enableOpenCLAndHexagon = true,
-    enableOpenCL = true, // Deprecated
+    enableOpenCL = true,
   } = options
-
-  if (typeof options.enableOpenCL !== 'undefined') {
-    console.warn(
-      'enableOpenCL is deprecated. Use enableOpenCLAndHexagon instead.',
-    )
-  }
 
   const isProdProfile =
     process.env.EAS_BUILD_PROFILE === entitlementsProfile ||
@@ -114,7 +106,7 @@ const withLlamaRn: ConfigPlugin<PluginOptions> = (config, options = {}) => {
     ])
   }
 
-  if (enableOpenCL && enableOpenCLAndHexagon) {
+  if (enableOpenCL) {
     config = withAndroidManifest(config, (c) => {
       const app = c.modResults.manifest.application?.[0] as any
       if (!app) return c
@@ -127,22 +119,11 @@ const withLlamaRn: ConfigPlugin<PluginOptions> = (config, options = {}) => {
       const openclAlreadyExists = libs.some(
         (lib: any) => lib.$['android:name'] === 'libOpenCL.so',
       )
-      const cdsprpcAlreadyExists = libs.some(
-        (lib: any) => lib.$['android:name'] === 'libcdsprpc.so',
-      )
 
       if (!openclAlreadyExists) {
         libs.push({
           $: {
             'android:name': 'libOpenCL.so',
-            'android:required': 'false',
-          },
-        })
-      }
-      if (!cdsprpcAlreadyExists) {
-        libs.push({
-          $: {
-            'android:name': 'libcdsprpc.so',
             'android:required': 'false',
           },
         })

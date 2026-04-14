@@ -51,4 +51,16 @@ namespace rnllama_jsi {
         return info;
     }
 
+    inline jsi::Object createTokenizeResult(jsi::Runtime& runtime, const rnllama::llama_rn_tokenize_result& result) {
+        jsi::Object res(runtime);
+
+        jsi::Array tokens = jsi::Array(runtime, result.tokens.size());
+        for (size_t i = 0; i < result.tokens.size(); ++i) {
+            tokens.setValueAtIndex(runtime, i, (double)result.tokens[i]);
+        }
+        res.setProperty(runtime, "tokens", tokens);
+
+        return res;
+    }
+
 }
